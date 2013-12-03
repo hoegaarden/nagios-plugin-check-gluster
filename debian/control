@@ -1,0 +1,16 @@
+Source: nagios-plugin-check-gluster
+Section: net
+Priority: optional
+Maintainer: Hannes Hörl <hannes.hoerl@snowreporter.com>
+Build-Depends: debhelper (>= 8.0.0)
+Standards-Version: 3.9.4
+#Homepage: <insert the upstream URL, if relevant>
+#Vcs-Git: git://git.debian.org/collab-maint/nagios-plugin-check-gluster.git
+#Vcs-Browser: http://git.debian.org/?p=collab-maint/nagios-plugin-check-gluster.git;a=summary
+
+Package: nagios-plugin-check-gluster
+Architecture: all
+Depends: ${misc:Depends}, ${perl:Depends}, libnagios-plugin-perl, libio-captureoutput-perl
+Description: Icinga/Nagios check for GlusterFS nodes
+ Icinga/Nagios-plugin based on Nagios::Plugin for checking
+ GlusterFS nodes

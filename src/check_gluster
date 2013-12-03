@@ -1,0 +1,398 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use 5.10.00;
+
+use Data::Dumper;
+use List::Util qw(max);
+
+# libnagios-plugin-perl 
+use Nagios::Plugin;
+# libio-captureoutput-perl
+use IO::CaptureOutput qw(qxx);
+
+
+my $SHORT_NAME = 'CHECK_GLUSTERFS';
+my $VERSION = '0.0.0';
+
+##------------------------------------------------------------
+my $np = Nagios::Plugin->new(
+    'usage'     => 'Usage: %s [ -m|--mode=<mode> ]' ,
+    'shortname' => $SHORT_NAME ,
+    'version'   => $VERSION
+);
+
+$np->add_arg(
+    'spec'     => 'mode|m=s' ,
+    'required' => 1 ,
+    'default'  => getDefaultsFromEnv('MODE', 's') ,
+    'help'     => 'Run in server (s) or client (c) mode (default: %s)'
+);
+$np->add_arg(
+    'spec'     => 'peers|p=i' ,
+    'required' => 1 ,
+    'default'  => getDefaultsFromEnv('PEERS', 2) ,
+    'help'     => 'number of peers which are expected to be up (default: %s)'
+);
+$np->add_arg(
+    'spec'     => 'inode-crit=i' ,
+    'default'  => getDefaultsFromEnv('INODE_CRIT', 90) ,
+    'help'     => 'threshold for percentage of used inodes to trigger critical state (default: %s)'
+);
+$np->add_arg(
+    'spec'     => 'inode-warn=i' ,
+    'default'  => getDefaultsFromEnv('INODE_WARN', 80) ,
+    'help'     => 'threshold for percentage of used inodes to tirgger warning state (default: %s)'
+);
+$np->add_arg(
+    'spec'     => 'disk-crit=i' ,
+    'default'  => getDefaultsFromEnv('DISK_CRIT', 90) ,
+    'help'     => 'threshold for percentage of used diskspace to trigger critical state (default: %s)'
+);
+$np->add_arg(
+    'spec'     => 'disk-warn=i' ,
+    'default'  => getDefaultsFromEnv('DISK_WARN', 80) ,
+    'help'     => 'threshold for percentage of used diskspace to tirgger warning state (default: %s)'
+);
+
+
+$np->getopts;
+
+
+
+if (lc($np->opts->mode) eq 's') {
+    runChecksOnServer();
+} elsif (lc($np->opts->mode) eq 'c') {
+    runChecksOnClient();
+} else {
+    $np->die('invalid mode');
+}
+
+my ($code, $msg) = $np->check_messages(
+    join     => ', ' ,
+    join_all => '; '
+);
+
+$np->nagios_exit($code, $msg);
+
+
+
+##------------------------------------------------------------
+sub runChecksOnClient {
+    $np->die('client mode not implemented yet.');
+}
+
+
+##------------------------------------------------------------
+sub runChecksOnServer {
+    checkServerPeers();
+    checkServerVols();
+}
+
+
+##------------------------------------------------------------
+sub checkServerVols {
+    my $vol_list = getVolList();
+
+    foreach my $vol ( @$vol_list ) {
+        checkServerSingleVol($vol);
+    }
+}
+
+
+##------------------------------------------------------------
+sub checkServerSingleVol {
+    my $vol = shift;
+
+    my $vol_info = getVolInfo($vol);
+    my $brick_info = getBrickInfos($vol);
+
+    my $agg = getAgg( $vol );
+
+    # Check, if state == "Started"
+    if ( $vol_info->{status} ne 'Started' ) {
+        $agg->(CRITICAL, 'not started');
+    }
+
+    # Check, if we always get the same number of bricks
+    my $same = (
+        $vol_info->{nrBricks} == scalar @{ $vol_info->{bricks} } &&
+        scalar @{ $vol_info->{bricks} } == scalar keys($brick_info)
+    );
+
+    if ( !$same ) {
+        $agg->(CRITICAL, 'got diff number of bricks');
+    }
+    
+    $agg->();
+
+    foreach ( keys($brick_info) ) {
+        checkServerSingleBrick($vol, $brick_info->{$_});
+    }
+}
+
+
+##------------------------------------------------------------
+sub checkServerSingleBrick {
+    my $vol = shift;
+    my $info = shift;
+
+    my $brick = $info->{brick};
+    
+    my $agg = getAgg($vol, $brick);
+    
+    if ( $info->{online} ne 'Y' ) {
+        $agg->(CRITICAL, 'not online');
+    }
+
+    my @inodes = compareStuff(
+        'inode' , $info->{freeInodes} , $info->{inodeCount} , 'InodeCnt'
+    );
+
+    my @disk = compareStuff(
+        'disk' , size2kb( $info->{diskSpaceFree} ) ,
+        size2kb( $info->{totalDiskSpace} ) , 'DiskFull'
+    );
+
+    $agg->(@inodes) if (@inodes);
+    $agg->(@disk)   if (@disk);
+
+    $agg->();
+}
+
+
+##------------------------------------------------------------
+sub compareStuff {
+    my $opt = shift;
+    my $free = shift;
+    my $max = shift;
+    my $msg = shift || $opt;
+
+    my $crit = $np->opts->{ $opt . '-crit' };
+    my $warn = $np->opts->{ $opt . '-warn' };
+
+    my $pct = 100 - ( 100 * $free / $max );
+
+    if ($pct >= $crit) {
+        return (CRITICAL, "${msg} CRIT ($pct)");
+    } elsif ($pct >= $warn) {
+        return (WARNING, "${msg} WARN");
+    }
+}
+
+
+##------------------------------------------------------------
+sub size2kb {
+    my ($size, $unit) = shift =~ m/^([\d\.]+)(.*)$/ ;
+    $unit = lc($unit);
+
+    return $size * 1024                if ($unit eq 'kb');
+    return $size * 1024*1024           if ($unit eq 'mb');
+    return $size * 1024*1024*1024      if ($unit eq 'gb');
+    return $size * 1024*1024*1024*1024 if ($unit eq 'tb');
+
+    return undef;
+}
+
+
+##------------------------------------------------------------
+sub getAgg {
+    my @states = ();
+    my @msgs   = ();
+
+    my $pre = join('::', @_);
+    $pre .= ': '
+        if ($pre);
+
+    return sub {
+        my ($state, $msg) = @_;
+
+        if (defined($state) && defined($msg)) {
+            push(@states, $state);
+            push(@msgs, $msg);
+        } else {
+            if ((@states + @msgs) > 0) {
+                $np->add_message(
+                    $np->max_state_alt(@states) ,
+                    $pre . join(', ', @msgs)
+                );
+                @states = ();
+                @msgs = ();
+            }
+        }
+    }
+}
+
+
+##------------------------------------------------------------
+sub getBrickInfos {
+    my $vol = shift;
+    
+    my ($out, $err, $ok, $code) = runGlusterCmd('volume', 'status', $vol, 'detail');
+
+    if (!$ok || $code) {
+        $np->add_message(CRITICAL, short($err||$out));
+        return;
+    }
+
+    my @brick_infos = split(/^[-]+\s+/m, $out);
+    unless ( scalar @brick_infos ) {
+        $np->add_message(CRITICAL, "no status for ${vol}");
+        return;
+    }
+
+    my $all = {};
+    
+    shift(@brick_infos); # remove 'heading'
+    foreach my $str (@brick_infos) {
+        cleanSpaces( \$str );
+
+        my $brick_status = {};
+        foreach my $line ( split("\n", $str) ) {
+            my ($key, $val) = split(":", $line, 2);
+            cleanSpaces( \$key, \$val );
+
+            # camelCase it ...
+            $key = lc($key);
+            $key =~ s/\s+(\S)/\U$1/g ;
+
+            $val =~ s/Brick //
+                if ($key eq 'brick');
+
+            $brick_status->{$key} = $val;
+        }
+
+        my $brick = $brick_status->{brick};
+        $all->{ $brick } = $brick_status;
+    }
+
+    return $all;
+}
+
+
+##---------------------------------------------------------------------
+sub cleanSpaces {
+    foreach my $ref (@_) {
+        $$ref =~ s/(^\s*|\s*$)//g ;
+    }
+}
+
+
+##------------------------------------------------------------
+sub getVolInfo {
+    my $vol = shift;
+
+    my ($out, $err, $ok, $code) = runGlusterCmd('volume', 'info', $vol);
+
+    if (!$ok || $code) {
+        $np->add_message(CRITICAL, short($err||$out));
+        return;
+    }
+    
+    my ($status) = $out =~ m/Status: (.*)/ ;
+    my ($nr_bricks) = $out =~ m/Number of Bricks:.*\s(\d+)$/m ;
+    my ($type) = $out =~ m/Type: (.*)/ ;
+
+    my @bricks;
+    while ( $out =~ m/Brick\d+: (.*)/gm ) {
+        push(@bricks, $1);
+    }
+    
+    return  {
+        type     => $type ,
+        nrBricks => $nr_bricks + 0 ,
+        bricks   => \@bricks ,
+        status   => $status
+    };
+}
+
+##------------------------------------------------------------
+sub getVolList {
+    my ($out, $err, $ok, $code) = runGlusterCmd('volume', 'list');
+
+    if ($ok && !$code) {
+        my @list = split(/\n/, $out);
+        return \@list;
+    } else {
+        $np->add_message(CRITICAL, short($err||$out));
+        return;
+    }
+}
+
+##------------------------------------------------------------
+sub checkServerPeers {
+    my $nr_wanted = $np->opts->peers;
+
+    my ($out, $err, $ok, $code) = runGlusterCmd('peer', 'status');
+
+    if ($ok && !$code) {
+        my ($nr_found) = $out =~ m/Number of Peers: (\d+)/g;
+        
+        my $nr_connected = 0;
+        while ($out =~ m/State: Peer in Cluster \(Connected\)/g) {
+            $nr_connected += 1;
+        }
+        
+        if ($nr_found != $nr_wanted) {
+            $np->add_message(CRITICAL, "${nr_found} of ${nr_wanted} peers registered");
+        }
+
+        if ($nr_found != $nr_connected) {
+            $np->add_message(CRITICAL, "${nr_connected} of ${nr_found} peers connected");
+        }
+    } else {
+        $np->add_message(CRITICAL, short($err||$out));
+    }
+}
+
+
+##------------------------------------------------------------
+sub short {
+    my $msg = shift;
+    my $len = shift || 40;
+
+    $msg =~ s/\n/ /smg;
+    return substr($msg, 0, $len);
+}
+
+##------------------------------------------------------------
+sub runGlusterCmd {
+    return runCmd( 'gluster', @_ );
+}
+
+
+##------------------------------------------------------------
+sub runCmd {
+    my ($stdout, $stderr, $success, $exit_code) = qxx( @_ );
+    $exit_code = ($exit_code >> 8);
+    return ($stdout, $stderr, $success, $exit_code);
+}
+
+
+##------------------------------------------------------------
+sub getDefaultsFromEnv {
+    my $key = uc(shift);
+    my $default = shift;
+
+    $key =~ s/-/_/g;
+    $key =~ s/\s+/_/g;
+
+    my @pre = (
+        'ICINGA__SERVICE' ,
+        'ICINGA__HOST' ,
+        'NAGIOS__SERVICE' ,
+        'NAGIOS__HOST' ,
+        ''
+    );
+
+    foreach (@pre) {
+        my $env = "${_}${SHORT_NAME}_${key}";
+        
+        if (exists($ENV{$env})) {
+            return $ENV{$env};
+        }
+    }
+
+    return $default;
+}
