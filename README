@@ -1,0 +1,43 @@
+
+Nagios/Icinga checks for a glusterfs node
+=========================================
+
+Checks
+------
+  Local checks include:
+    - peer status
+    - inode & filesystem capacity
+
+    All local checks are performed via the gluster commandline tool.
+
+  Remote;
+    not implemented yet
+
+
+Options
+-------
+ -m, --mode=STRING
+   Run local or remote checks (default: local)
+
+ -p, --peers=INTEGER
+   number of peers which are expected to be up (default: 2)
+
+ --inode-crit=INTEGER
+   threshold for percentage of used inodes to trigger critical state (default: 90)
+
+ --inode-warn=INTEGER
+   threshold for percentage of used inodes to tirgger warning state (default: 80)
+
+ --disk-crit=INTEGER
+   threshold for percentage of used diskspace to trigger critical state (default: 90)
+
+ --disk-warn=INTEGER
+   threshold for percentage of used diskspace to tirgger warning state (default: 80)
+
+All options can be given as environment variables too; dis can come in
+handy combined with 'Custom Object Variables'[1]. Commandline options
+however take precedence over environment variables.
+
+
+[1] http://docs.icinga.org/1.9/en/customobjectvars.html
+

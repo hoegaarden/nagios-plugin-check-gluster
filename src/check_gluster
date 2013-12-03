@@ -14,11 +14,11 @@ use IO::CaptureOutput qw(qxx);
 
 
 my $SHORT_NAME = 'CHECK_GLUSTERFS';
-my $VERSION = '0.0.0';
+my $VERSION = '0.0.1-1';
 
 ##------------------------------------------------------------
 my $np = Nagios::Plugin->new(
-    'usage'     => 'Usage: %s [ -m|--mode=<mode> ]' ,
+    'usage'     => 'Usage: see %s --help' ,
     'shortname' => $SHORT_NAME ,
     'version'   => $VERSION
 );
@@ -26,8 +26,8 @@ my $np = Nagios::Plugin->new(
 $np->add_arg(
     'spec'     => 'mode|m=s' ,
     'required' => 1 ,
-    'default'  => getDefaultsFromEnv('MODE', 's') ,
-    'help'     => 'Run in server (s) or client (c) mode (default: %s)'
+    'default'  => getDefaultsFromEnv('MODE', 'local') ,
+    'help'     => 'Run local or remote checks (default: %s)'
 );
 $np->add_arg(
     'spec'     => 'peers|p=i' ,
@@ -61,10 +61,10 @@ $np->getopts;
 
 
 
-if (lc($np->opts->mode) eq 's') {
-    runChecksOnServer();
-} elsif (lc($np->opts->mode) eq 'c') {
-    runChecksOnClient();
+if (lc($np->opts->mode) eq 'local') {
+    runLocalChecks();
+} elsif (lc($np->opts->mode) eq 'remote') {
+    runRemoteChecks();
 } else {
     $np->die('invalid mode');
 }
@@ -79,30 +79,30 @@ $np->nagios_exit($code, $msg);
 
 
 ##------------------------------------------------------------
-sub runChecksOnClient {
-    $np->die('client mode not implemented yet.');
+sub runRemoteChecks {
+    $np->die('remote checks not implemented yet.');
 }
 
 
 ##------------------------------------------------------------
-sub runChecksOnServer {
-    checkServerPeers();
-    checkServerVols();
+sub runLocalChecks {
+    checkLocalPeers();
+    checkLocalVols();
 }
 
 
 ##------------------------------------------------------------
-sub checkServerVols {
+sub checkLocalVols {
     my $vol_list = getVolList();
 
     foreach my $vol ( @$vol_list ) {
-        checkServerSingleVol($vol);
+        checkLocalSingleVol($vol);
     }
 }
 
 
 ##------------------------------------------------------------
-sub checkServerSingleVol {
+sub checkLocalSingleVol {
     my $vol = shift;
 
     my $vol_info = getVolInfo($vol);
@@ -128,13 +128,13 @@ sub checkServerSingleVol {
     $agg->();
 
     foreach ( keys($brick_info) ) {
-        checkServerSingleBrick($vol, $brick_info->{$_});
+        checkLocalSingleBrick($vol, $brick_info->{$_});
     }
 }
 
 
 ##------------------------------------------------------------
-sub checkServerSingleBrick {
+sub checkLocalSingleBrick {
     my $vol = shift;
     my $info = shift;
 
@@ -321,7 +321,7 @@ sub getVolList {
 }
 
 ##------------------------------------------------------------
-sub checkServerPeers {
+sub checkLocalPeers {
     my $nr_wanted = $np->opts->peers;
 
     my ($out, $err, $ok, $code) = runGlusterCmd('peer', 'status');
